@@ -144,6 +144,8 @@ def create_pool(batch_service_client, pool_id):
     """
     print('Creating pool [{}]...'.format(pool_id))
 
+    sample_task_file = upload_file_to_container(block_blob_client, container_name, file_path)
+
     # Create a new pool of Linux compute nodes using an Azure Virtual Machines
     # Marketplace image. For more information about creating pools of Linux
     # nodes, see:
@@ -159,7 +161,10 @@ def create_pool(batch_service_client, pool_id):
             ),
             node_agent_sku_id="batch.node.ubuntu 18.04"),
         vm_size=config._POOL_VM_SIZE,
-        target_dedicated_nodes=config._POOL_NODE_COUNT
+        target_dedicated_nodes=config._POOL_NODE_COUNT,
+        start_task=batchmodels.StartTask(
+            command_line="python " + _SIMPLE_TASK_NAME,
+            resource_files=sample_task_file)
     )
     batch_service_client.pool.add(new_pool)
 
@@ -182,7 +187,7 @@ def create_job(batch_service_client, job_id, pool_id):
     batch_service_client.job.add(job)
 
 
-def add_tasks(batch_service_client, job_id, input_files):
+def add_tasks(batch_service_client, job_id, input_files, simple_task_file,dummy_text_file):
     """
     Adds a task for each input file in the collection to the specified job.
 
@@ -201,11 +206,12 @@ def add_tasks(batch_service_client, job_id, input_files):
 
     for idx, input_file in enumerate(input_files):
 
-        command = "/bin/bash -c \"cat {}\"".format(input_file.file_path)
+        #command = "/bin/bash -c \"cat {}\"".format(input_file.file_path)
+        command = "python " + config._SIMPLE_TASK_NAME + " " + config._DUMMY_FILE + " {}".format(input_file.file_path) 
         tasks.append(batch.models.TaskAddParameter(
             id='Task{}'.format(idx),
             command_line=command,
-            resource_files=[input_file]
+            resource_files=[input_file,simple_task_file,dummy_text_file]
         )
         )
 
@@ -314,15 +320,43 @@ if __name__ == '__main__':
     input_container_name = 'input'
     blob_client.create_container(input_container_name, fail_on_exist=False)
 
+    """
     # The collection of data files that are to be processed by the tasks.
     input_file_paths = [os.path.join(sys.path[0], 'taskdata0.txt'),
                         os.path.join(sys.path[0], 'taskdata1.txt'),
                         os.path.join(sys.path[0], 'taskdata2.txt')]
+    """
+    input_file_paths = []
+    common_file_paths = [os.path.join(sys.path[0], config._DUMMY_FILE_PATH),
+                         os.path.join(sys.path[0], config._SIMPLE_TASK_PATH)]
+    
+    for i in range(30):
+        #infile = open(os.path.join(sys.path[0],'taskdata0.txt'),'rb')
+        text = 'Input Sample File #' + str(i) +'.' 
+        outfilename = 'inputText' + str(i) + '.txt'
+        outfile = open(os.path.join(sys.path[0],outfilename),'w')
+        outfile.write(text)
+        #infile.close()
+        outfile.close()
+        input_file_paths.append(os.path.join(sys.path[0], outfilename))
+    
 
     # Upload the data files.
     input_files = [
         upload_file_to_container(blob_client, input_container_name, file_path)
         for file_path in input_file_paths]
+
+    # Upload simple_task.py
+    simple_task_file = upload_file_to_container(blob_client, input_container_name,config._SIMPLE_TASK_PATH)
+
+    # Upload dummy text
+    dummy_text_file = upload_file_to_container(blob_client, input_container_name,config._DUMMY_FILE_PATH)
+
+    # Upload common files
+    #common_files = [
+    #    upload_file_to_container(blob_client, input_container_name, file_path)
+    #    for file_path in common_file_paths]
+
 
     # Create a Batch service client. We'll now be interacting with the Batch
     # service in addition to Storage
@@ -336,13 +370,13 @@ if __name__ == '__main__':
     try:
         # Create the pool that will contain the compute nodes that will execute the
         # tasks.
-        create_pool(batch_client, config._POOL_ID)
+        #create_pool(batch_client, config._POOL_ID)
 
         # Create the job that will run the tasks.
         create_job(batch_client, config._JOB_ID, config._POOL_ID)
 
         # Add the tasks to the job.
-        add_tasks(batch_client, config._JOB_ID, input_files)
+        add_tasks(batch_client, config._JOB_ID, input_files,simple_task_file,dummy_text_file)
 
         # Pause execution until tasks reach Completed state.
         wait_for_tasks_to_complete(batch_client,
