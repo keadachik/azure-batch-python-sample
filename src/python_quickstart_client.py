@@ -130,6 +130,27 @@ def get_container_sas_token(block_blob_client,
 
     return container_sas_token
 
+def get_container_sas_url(block_blob_client,
+                          container_name, blob_permissions):
+    """
+    Obtains a shared access signature URL that provides write access to the 
+    ouput container to which the tasks will upload their output.
+    :param block_blob_client: A blob service client.
+    :type block_blob_client: `azure.storage.blob.BlockBlobService`
+    :param str container_name: The name of the Azure Blob storage container.
+    :param BlobPermissions blob_permissions:
+    :rtype: str
+    :return: A SAS URL granting the specified permissions to the container.
+    """
+    # Obtain the SAS token for the container.
+    sas_token = get_container_sas_token(block_blob_client,
+                                        container_name, azureblob.BlobPermissions.WRITE)
+
+    # Construct SAS URL for the container
+    container_sas_url = "https://{}.blob.core.windows.net/{}?{}".format(
+        config._STORAGE_ACCOUNT_NAME, container_name, sas_token)
+
+    return container_sas_url
 
 def create_pool(batch_service_client, pool_id):
     """
@@ -144,7 +165,6 @@ def create_pool(batch_service_client, pool_id):
     """
     print('Creating pool [{}]...'.format(pool_id))
 
-    sample_task_file = upload_file_to_container(block_blob_client, container_name, file_path)
 
     # Create a new pool of Linux compute nodes using an Azure Virtual Machines
     # Marketplace image. For more information about creating pools of Linux
@@ -161,10 +181,7 @@ def create_pool(batch_service_client, pool_id):
             ),
             node_agent_sku_id="batch.node.ubuntu 18.04"),
         vm_size=config._POOL_VM_SIZE,
-        target_dedicated_nodes=config._POOL_NODE_COUNT,
-        start_task=batchmodels.StartTask(
-            command_line="python " + _SIMPLE_TASK_NAME,
-            resource_files=sample_task_file)
+        target_dedicated_nodes=config._POOL_NODE_COUNT
     )
     batch_service_client.pool.add(new_pool)
 
@@ -187,7 +204,7 @@ def create_job(batch_service_client, job_id, pool_id):
     batch_service_client.job.add(job)
 
 
-def add_tasks(batch_service_client, job_id, input_files, simple_task_file,dummy_text_file):
+def add_tasks(batch_service_client, job_id, input_files, common_files,output_container_sas_url):
     """
     Adds a task for each input file in the collection to the specified job.
 
@@ -207,11 +224,19 @@ def add_tasks(batch_service_client, job_id, input_files, simple_task_file,dummy_
     for idx, input_file in enumerate(input_files):
 
         #command = "/bin/bash -c \"cat {}\"".format(input_file.file_path)
-        command = "python " + config._SIMPLE_TASK_NAME + " " + config._DUMMY_FILE + " {}".format(input_file.file_path) 
+        simple_task_file=common_files[0]
+        dummy_text_file=common_files[1]
+        output_file_path='Task{}'.format(idx) + 'output.txt'
+        command = "python " + config._SIMPLE_TASK_NAME + " " + config._DUMMY_FILE + " {}".format(input_file.file_path) + ' '+ 'Task{}'.format(idx) 
         tasks.append(batch.models.TaskAddParameter(
             id='Task{}'.format(idx),
             command_line=command,
-            resource_files=[input_file,simple_task_file,dummy_text_file]
+            resource_files=[input_file,simple_task_file,dummy_text_file],
+            #recource_files=[input_file,common_files[0],common_files[1]],
+            output_files=[batchmodels.OutputFile(file_pattern=output_file_path,
+            destination=batchmodels.OutputFileDestination(container=batchmodels.OutputFileBlobContainerDestination(
+                container_url=output_container_sas_url)),upload_options=batchmodels.OutputFileUploadOptions(
+                    upload_condition=batchmodels.OutputFileUploadCondition.task_success))]
         )
         )
 
@@ -318,7 +343,9 @@ if __name__ == '__main__':
     # don't yet exist.
 
     input_container_name = 'input'
+    output_container_name = 'output'
     blob_client.create_container(input_container_name, fail_on_exist=False)
+    blob_client.create_container(output_container_name, fail_on_exist=False)
 
     """
     # The collection of data files that are to be processed by the tasks.
@@ -347,15 +374,23 @@ if __name__ == '__main__':
         for file_path in input_file_paths]
 
     # Upload simple_task.py
-    simple_task_file = upload_file_to_container(blob_client, input_container_name,config._SIMPLE_TASK_PATH)
+    #simple_task_file = upload_file_to_container(blob_client, input_container_name,config._SIMPLE_TASK_PATH)
 
     # Upload dummy text
-    dummy_text_file = upload_file_to_container(blob_client, input_container_name,config._DUMMY_FILE_PATH)
+    #dummy_text_file = upload_file_to_container(blob_client, input_container_name,config._DUMMY_FILE_PATH)
 
     # Upload common files
-    #common_files = [
-    #    upload_file_to_container(blob_client, input_container_name, file_path)
-    #    for file_path in common_file_paths]
+    common_files = [
+        upload_file_to_container(blob_client, input_container_name, common_file_path)
+        for common_file_path in common_file_paths]
+
+    # Obtain a shared access signature URL that provides write access to the output
+    # container to which the tasks will upload their output.
+
+    output_container_sas_url = get_container_sas_url(
+        blob_client,
+        output_container_name,
+        azureblob.BlobPermissions.WRITE)
 
 
     # Create a Batch service client. We'll now be interacting with the Batch
@@ -376,7 +411,8 @@ if __name__ == '__main__':
         create_job(batch_client, config._JOB_ID, config._POOL_ID)
 
         # Add the tasks to the job.
-        add_tasks(batch_client, config._JOB_ID, input_files,simple_task_file,dummy_text_file)
+        #add_tasks(batch_client, config._JOB_ID, input_files,simple_task_file,dummy_text_file)
+        add_tasks(batch_client, config._JOB_ID, input_files,common_files,output_container_sas_url)
 
         # Pause execution until tasks reach Completed state.
         wait_for_tasks_to_complete(batch_client,
