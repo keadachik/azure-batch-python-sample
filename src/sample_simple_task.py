@@ -16,6 +16,8 @@ def bin_cat(args,output):
 
 if __name__=='__main__':
 
-    output = sys.argv[3] + "output.txt"
+    output = 'output.txt'
 
     bin_cat(sys.argv[1:3],output)
+
+    print(sys.version)

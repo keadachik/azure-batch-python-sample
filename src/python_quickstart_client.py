@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import config
+import start_task
 try:
     input = raw_input
 except NameError:
@@ -182,7 +183,11 @@ def create_pool(batch_service_client, pool_id):
             node_agent_sku_id="batch.node.ubuntu 18.04"),
         vm_size=config._POOL_VM_SIZE,
         target_dedicated_nodes=config._POOL_NODE_COUNT,
-        target_low_priority_nodes=config._LOW_PRIORITY_POOL_NODE_COUNT
+        target_low_priority_nodes=config._LOW_PRIORITY_POOL_NODE_COUNT,
+        start_task=batchmodels.StartTask(
+            command_line=wrap_commands_in_shell('linux',start_task.task_commands),
+            user_identity=batchmodels.UserIdentity(auto_user=start_task.user),
+            wait_for_success=True)
     )
     batch_service_client.pool.add(new_pool)
 
@@ -224,20 +229,32 @@ def add_tasks(batch_service_client, job_id, input_files, common_files,output_con
 
     for idx, input_file in enumerate(input_files):
 
-        #command = "/bin/bash -c \"cat {}\"".format(input_file.file_path)
         simple_task_file=common_files[0]
         dummy_text_file=common_files[1]
-        output_file_path='Task{}'.format(idx) + 'output.txt'
-        command = "python " + config._SIMPLE_TASK_NAME + " " + config._DUMMY_FILE + " {}".format(input_file.file_path) + ' '+ 'Task{}'.format(idx) 
+        output_file_path = './output.txt'
+        std_file_path = '../std*.txt'
+        upload_st_file_path = '../fileupload*.txt'
+        upload_file_path = os.path.join(job_id,'Task{}'.format(idx))
+        OutputFiles = [
+            batchmodels.OutputFile(file_pattern=output_file_path,
+            destination=batchmodels.OutputFileDestination(container=batchmodels.OutputFileBlobContainerDestination(
+                container_url=output_container_sas_url,path=upload_file_path)),upload_options=batchmodels.OutputFileUploadOptions(
+                    upload_condition=batchmodels.OutputFileUploadCondition.task_success)),
+            batchmodels.OutputFile(file_pattern=std_file_path,
+            destination=batchmodels.OutputFileDestination(container=batchmodels.OutputFileBlobContainerDestination(
+                container_url=output_container_sas_url,path=upload_file_path)),upload_options=batchmodels.OutputFileUploadOptions(
+                    upload_condition=batchmodels.OutputFileUploadCondition.task_success)),
+            batchmodels.OutputFile(file_pattern=upload_st_file_path,
+            destination=batchmodels.OutputFileDestination(container=batchmodels.OutputFileBlobContainerDestination(
+                container_url=output_container_sas_url,path=upload_file_path)),upload_options=batchmodels.OutputFileUploadOptions(
+                    upload_condition=batchmodels.OutputFileUploadCondition.task_success))      
+        ]
+        command = "python " + config._SIMPLE_TASK_NAME + " " + config._DUMMY_FILE + " {}".format(input_file.file_path) 
         tasks.append(batch.models.TaskAddParameter(
             id='Task{}'.format(idx),
             command_line=command,
             resource_files=[input_file,simple_task_file,dummy_text_file],
-            #recource_files=[input_file,common_files[0],common_files[1]],
-            output_files=[batchmodels.OutputFile(file_pattern=output_file_path,
-            destination=batchmodels.OutputFileDestination(container=batchmodels.OutputFileBlobContainerDestination(
-                container_url=output_container_sas_url)),upload_options=batchmodels.OutputFileUploadOptions(
-                    upload_condition=batchmodels.OutputFileUploadCondition.task_success))]
+            output_files=OutputFiles
         )
         )
 
@@ -326,6 +343,20 @@ def _read_stream_as_string(stream, encoding):
         output.close()
     raise RuntimeError('could not write data to stream or decode bytes')
 
+def wrap_commands_in_shell(ostype, commands):
+    """Wrap commands in a shell
+    :param list commands: list of commands to wrap
+    :param str ostype: OS type, linux or windows
+    :rtype: str
+    :return: a shell wrapping commands
+    """
+    if ostype.lower() == 'linux':
+        return '/bin/bash -c \'set -e; set -o pipefail; {}; wait\''.format(
+            ';'.join(commands))
+    elif ostype.lower() == 'windows':
+        return 'cmd.exe /c "{}"'.format('&'.join(commands))
+    else:
+        raise ValueError('unknown ostype: {}'.format(ostype))
 
 if __name__ == '__main__':
 
@@ -348,23 +379,15 @@ if __name__ == '__main__':
     blob_client.create_container(input_container_name, fail_on_exist=False)
     blob_client.create_container(output_container_name, fail_on_exist=False)
 
-    """
-    # The collection of data files that are to be processed by the tasks.
-    input_file_paths = [os.path.join(sys.path[0], 'taskdata0.txt'),
-                        os.path.join(sys.path[0], 'taskdata1.txt'),
-                        os.path.join(sys.path[0], 'taskdata2.txt')]
-    """
     input_file_paths = []
     common_file_paths = [os.path.join(sys.path[0], config._DUMMY_FILE_PATH),
                          os.path.join(sys.path[0], config._SIMPLE_TASK_PATH)]
     
     for i in range(30):
-        #infile = open(os.path.join(sys.path[0],'taskdata0.txt'),'rb')
         text = 'Input Sample File #' + str(i) +'.' 
         outfilename = 'inputText' + str(i) + '.txt'
         outfile = open(os.path.join(sys.path[0],outfilename),'w')
         outfile.write(text)
-        #infile.close()
         outfile.close()
         input_file_paths.append(os.path.join(sys.path[0], outfilename))
     
@@ -373,12 +396,6 @@ if __name__ == '__main__':
     input_files = [
         upload_file_to_container(blob_client, input_container_name, file_path)
         for file_path in input_file_paths]
-
-    # Upload simple_task.py
-    #simple_task_file = upload_file_to_container(blob_client, input_container_name,config._SIMPLE_TASK_PATH)
-
-    # Upload dummy text
-    #dummy_text_file = upload_file_to_container(blob_client, input_container_name,config._DUMMY_FILE_PATH)
 
     # Upload common files
     common_files = [
@@ -406,7 +423,7 @@ if __name__ == '__main__':
     try:
         # Create the pool that will contain the compute nodes that will execute the
         # tasks.
-        create_pool(batch_client, config._POOL_ID)
+        #create_pool(batch_client, config._POOL_ID)
 
         # Create the job that will run the tasks.
         create_job(batch_client, config._JOB_ID, config._POOL_ID)
